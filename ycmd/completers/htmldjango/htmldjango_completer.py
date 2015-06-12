@@ -73,3 +73,7 @@ class HtmlDjangoCompleter(Completer):
     def ComputeCandidatesInner(self, request_data):
         script = self._GetDjangoInspector(request_data)
         return script.completions()
+
+    def ShouldUseNow(self, request_data):
+        script = self._GetDjangoInspector(request_data)
+        return script.in_django_tag()
