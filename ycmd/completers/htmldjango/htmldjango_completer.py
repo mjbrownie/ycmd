@@ -17,20 +17,14 @@
 # You should have received a copy of the GNU General Public License
 # along with YouCompleteMe.  If not, see <http://www.gnu.org/licenses/>.
 
-import json
 import logging
-import os
-import subprocess
-
-from ycmd import responses
-from ycmd import utils
+logging.debug("htmldjango:init")
 from ycmd.completers.completer import Completer
-
-from django_completeme.parser import TemplateInspector
 
 try:
     from django_completeme.parser import TemplateInspector
 except ImportError:
+    logging.info("htmldjango:parser_load_fail")
     raise ImportError(
         'Error importing django_completeme. Make sure the django_completeme '
         'submodule has been checked out In the YouCompleteMe folder, '
@@ -40,6 +34,8 @@ except ImportError:
 # TODO really can be anything. normally set ft=htmldjango handles this
 HTMLDJANGO_FILETYPES = set(['html', 'htmldjango'])
 
+
+logging.debug("htmldjango:parser_loaded")
 
 class HtmlDjangoCompleter(Completer):
 
@@ -57,7 +53,7 @@ class HtmlDjangoCompleter(Completer):
     def _GetExtraData(self, completion):
         location = {}
         if completion.module_path:
-            location['filepath'] = ToUtf8IfNeeded(completion.module_path)
+            location['filepath'] = (completion.module_path)
         if completion.line:
             location['line_num'] = completion.line
         if completion.column:
