@@ -32,10 +32,11 @@ except ImportError:
 
 
 # TODO really can be anything. normally set ft=htmldjango handles this
-HTMLDJANGO_FILETYPES = set(['html', 'htmldjango'])
+HTMLDJANGO_FILETYPES = set(['htmldjango'])
 
 
 logging.debug("htmldjango:parser_loaded")
+
 
 class HtmlDjangoCompleter(Completer):
 
@@ -46,7 +47,6 @@ class HtmlDjangoCompleter(Completer):
         filename = request_data['filepath']
         contents = request_data['file_data'][filename]['contents']
         line = request_data['line_num']
-        # Jedi expects columns to start at 0, not 1
         column = request_data['column_num'] - 1
         return TemplateInspector(filename, line, column, contents)
 
