@@ -1,4 +1,4 @@
-# Copyright (C) 2011, 2012  Stephen Sugden <me@stephensugden.com>
+# Copyright (C) 2015 Michael Brown <mjbrownie@gmail.com>
 #
 # This file is part of YouCompleteMe.
 #
