@@ -20,11 +20,13 @@
 import logging
 logging.debug("htmldjango:init")
 from ycmd.completers.completer import Completer
-import sys
+import sys, os
+
+sys.path.append(os.getcwd())
 
 try:
     from django_completeme.parser import TemplateInspector
-except ImportError, e:
+except ImportError as e:
     logging.info("htmldjango:parser_load_fail")
     logging.info(sys.path)
     logging.info(e)
