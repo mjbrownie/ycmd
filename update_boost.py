@@ -5,6 +5,7 @@ from __future__ import division
 from __future__ import unicode_literals
 from __future__ import absolute_import
 
+import argparse
 import os
 import platform
 import re
@@ -16,15 +17,11 @@ from shutil import rmtree
 from distutils.dir_util import copy_tree
 from multiprocessing import cpu_count
 
-DIR_OF_THIS_SCRIPT = os.path.dirname( os.path.abspath( __file__ ) )
-DIR_OF_THIRD_PARTY = os.path.join( DIR_OF_THIS_SCRIPT, 'third_party' )
+DIR_OF_THIS_SCRIPT = os.path.abspath( os.path.dirname( __file__ ) )
 
-sys.path.insert(
-  1, os.path.abspath( os.path.join( DIR_OF_THIRD_PARTY, 'argparse' ) ) )
-sys.path.insert(
-  1, os.path.abspath( os.path.join( DIR_OF_THIRD_PARTY, 'requests' ) ) )
+sys.path.insert( 1, os.path.join( DIR_OF_THIS_SCRIPT, 'third_party',
+                                  'requests' ) )
 
-import argparse
 import requests
 
 CHUNK_SIZE = 1024 * 1024 # 1 MB
@@ -37,7 +34,6 @@ BOOST_ARCHIVE = BOOST_NAME + '.tar.bz2'
 BOOST_PARTS = [
   'boost/algorithm/string/regex.hpp',
   'boost/filesystem.hpp',
-  'boost/python.hpp',
   'boost/regex.hpp'
 ]
 BOOST_LIBS_FOLDERS_TO_REMOVE = [
@@ -52,6 +48,7 @@ BOOST_LIBS_FOLDERS_TO_REMOVE = [
   'exception',
   'lockfree',
   'mpi',
+  'python',
   'serialization',
   'smart_ptr',
   'test',

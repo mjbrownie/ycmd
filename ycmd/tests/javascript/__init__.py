@@ -1,4 +1,4 @@
-# Copyright (C) 2016 ycmd contributors
+# Copyright (C) 2018 ycmd contributors
 #
 # This file is part of ycmd.
 #
@@ -22,17 +22,15 @@ from __future__ import absolute_import
 # Not installing aliases from python-future; it's unreliable and slow.
 from builtins import *  # noqa
 
+from mock import patch
 import functools
 import os
 
-from ycmd.tests.test_utils import ( ClearCompletionsCache,
-                                    CurrentWorkingDirectory, IsolatedApp,
+from ycmd.tests.test_utils import ( ClearCompletionsCache, IsolatedApp,
                                     SetUpApp, StopCompleterServer,
                                     WaitUntilCompleterServerReady )
-from ycmd.utils import GetCurrentDirectory
 
 shared_app = None
-shared_current_dir = None
 
 
 def PathToTestFile( *args ):
@@ -45,21 +43,18 @@ def setUpPackage():
   by all tests using the SharedYcmd decorator in this package. Additional
   configuration that is common to these tests, like starting a semantic
   subserver, should be done here."""
-  global shared_app, shared_current_dir
+  global shared_app
 
-  shared_app = SetUpApp()
-  shared_current_dir = GetCurrentDirectory()
-  os.chdir( PathToTestFile() )
-  WaitUntilCompleterServerReady( shared_app, 'javascript' )
+  with patch( 'ycmd.completers.javascript.tern_completer.'
+              'ShouldEnableTernCompleter', return_value = False ):
+    shared_app = SetUpApp()
+    WaitUntilCompleterServerReady( shared_app, 'javascript' )
 
 
 def tearDownPackage():
-  """Cleans up the tests using the SharedYcmd decorator in this package. It is
-  executed once after running all the tests in the package."""
-  global shared_app, shared_current_dir
+  global shared_app
 
   StopCompleterServer( shared_app, 'javascript' )
-  os.chdir( shared_current_dir )
 
 
 def SharedYcmd( test ):
@@ -84,26 +79,11 @@ def IsolatedYcmd( test ):
   started, no .ycm_extra_conf.py loaded, etc).
 
   Do NOT attach it to test generators but directly to the yielded tests."""
-  return IsolatedYcmdInDirectory( PathToTestFile() )
-
-
-def IsolatedYcmdInDirectory( directory ):
-  """Defines a decorator to be attached to tests of this package. This decorator
-  passes a unique ycmd application as a parameter running in the directory
-  supplied. It should be used on tests that change the server state in a
-  irreversible way (ex: a semantic subserver is stopped or restarted) or expect
-  a clean state (ex: no semantic subserver started, no .ycm_extra_conf.py
-  loaded, etc).
-
-  Do NOT attach it to test generators but directly to the yielded tests."""
-  def Decorator( test ):
-    @functools.wraps( test )
-    def Wrapper( *args, **kwargs ):
-      with IsolatedApp() as app:
-        try:
-          with CurrentWorkingDirectory( directory ):
-            test( app, *args, **kwargs )
-        finally:
-          StopCompleterServer( app, 'javascript' )
-    return Wrapper
-  return Decorator
+  @functools.wraps( test )
+  def Wrapper( *args, **kwargs ):
+    with IsolatedApp() as app:
+      try:
+        test( app, *args, **kwargs )
+      finally:
+        StopCompleterServer( app, 'javascript' )
+  return Wrapper

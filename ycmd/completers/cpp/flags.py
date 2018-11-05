@@ -1,4 +1,4 @@
-# Copyright (C) 2011, 2012 Google Inc.
+# Copyright (C) 2011-2018 ycmd contributors
 #
 # This file is part of ycmd.
 #
@@ -25,13 +25,17 @@ from builtins import *  # noqa
 import ycm_core
 import os
 import inspect
-import re
 from future.utils import PY2, native
 from ycmd import extra_conf_store
-from ycmd.utils import ( ToCppStringCompatible, OnMac, OnWindows, ToUnicode,
-                         ToBytes, PathsToAllParentFolders )
+from ycmd.utils import ( ListDirectory,
+                         OnMac,
+                         OnWindows,
+                         PathsToAllParentFolders,
+                         re,
+                         ToCppStringCompatible,
+                         ToBytes,
+                         ToUnicode )
 from ycmd.responses import NoExtraConfDetected
-
 
 # -include-pch and --sysroot= must be listed before -include and --sysroot
 # respectively because the latter is a prefix of the former (and the algorithm
@@ -39,23 +43,26 @@ from ycmd.responses import NoExtraConfDetected
 INCLUDE_FLAGS = [ '-isystem', '-I', '-iquote', '-isysroot', '--sysroot',
                   '-gcc-toolchain', '-include-pch', '-include', '-iframework',
                   '-F', '-imacros', '-idirafter' ]
+INCLUDE_FLAGS_WIN_STYLE = [ '/I' ]
 PATH_FLAGS =  [ '--sysroot=' ] + INCLUDE_FLAGS
 
 # We need to remove --fcolor-diagnostics because it will cause shell escape
 # sequences to show up in editors, which is bad. See Valloric/YouCompleteMe#1421
-STATE_FLAGS_TO_SKIP = set( [ '-c',
-                             '-MP',
-                             '-MD',
-                             '-MMD',
-                             '--fcolor-diagnostics' ] )
+STATE_FLAGS_TO_SKIP = { '-c',
+                        '-MP',
+                        '-MD',
+                        '-MMD',
+                        '--fcolor-diagnostics' }
+
+STATE_FLAGS_TO_SKIP_WIN_STYLE = { '/c' }
 
 # The -M* flags spec:
 #   https://gcc.gnu.org/onlinedocs/gcc-4.9.0/gcc/Preprocessor-Options.html
-FILE_FLAGS_TO_SKIP = set( [ '-MF',
-                            '-MT',
-                            '-MQ',
-                            '-o',
-                            '--serialize-diagnostics' ] )
+FILE_FLAGS_TO_SKIP = { '-MF',
+                       '-MT',
+                       '-MQ',
+                       '-o',
+                       '--serialize-diagnostics' }
 
 # Use a regex to correctly detect c++/c language for both versioned and
 # non-versioned compiler executable names suffixes
@@ -63,31 +70,30 @@ FILE_FLAGS_TO_SKIP = set( [ '-MF',
 # See Valloric/ycmd#266
 CPP_COMPILER_REGEX = re.compile( r'\+\+(-\d+(\.\d+){0,2})?$' )
 
+# Use a regex to match all the possible forms of clang-cl or cl compiler
+CL_COMPILER_REGEX = re.compile( r'(?:cl|clang-cl)(.exe)?$', re.IGNORECASE )
+
 # List of file extensions to be considered "header" files and thus not present
 # in the compilation database. The logic will try and find an associated
 # "source" file (see SOURCE_EXTENSIONS below) and use the flags for that.
-HEADER_EXTENSIONS = [ '.h', '.hxx', '.hpp', '.hh' ]
+HEADER_EXTENSIONS = [ '.h', '.hxx', '.hpp', '.hh', '.cuh' ]
 
 # List of file extensions which are considered "source" files for the purposes
 # of heuristically locating the flags for a header file.
-SOURCE_EXTENSIONS = [ '.cpp', '.cxx', '.cc', '.c', '.m', '.mm' ]
+SOURCE_EXTENSIONS = [ '.cpp', '.cxx', '.cc', '.c', '.cu', '.m', '.mm' ]
 
 EMPTY_FLAGS = {
   'flags': [],
 }
 
 
-class NoCompilationDatabase( Exception ):
-  pass
-
-
 class Flags( object ):
   """Keeps track of the flags necessary to compile a file.
   The flags are loaded from user-created python files (hereafter referred to as
-  'modules') that contain a method FlagsForFile( filename )."""
+  'modules') that contain a method Settings( **kwargs )."""
 
   def __init__( self ):
-    # It's caches all the way down...
+    # We cache the flags by a tuple of filename and client data.
     self.flags_for_file = {}
     self.extra_clang_flags = _ExtraClangFlags()
     self.no_extra_conf_file_warning_posted = False
@@ -96,7 +102,7 @@ class Flags( object ):
     # Keys are directory names and values are ycm_core.CompilationDatabase
     # instances or None. Value is None when it is known there is no compilation
     # database to be found for the directory.
-    self.compilation_database_dir_map = dict()
+    self.compilation_database_dir_map = {}
 
     # Sometimes we don't actually know what the flags to use are. Rather than
     # returning no flags, if we've previously found flags for a file in a
@@ -105,39 +111,50 @@ class Flags( object ):
     # compilation database) to receive at least some flags.
     # Keys are directory names and values are ycm_core.CompilationInfo
     # instances. Values may not be None.
-    self.file_directory_heuristic_map = dict()
+    self.file_directory_heuristic_map = {}
 
 
   def FlagsForFile( self,
                     filename,
                     add_extra_clang_flags = True,
                     client_data = None ):
+    """Returns a tuple describing the compiler invocation required to parse the
+    file |filename|. The tuple contains 2 entries:
+      1. A list of the compiler flags to use,
+      2. The name of the translation unit to parse.
+    Note that the second argument might not be the same as the |filename|
+    argument to this method in the event that the extra conf file overrides the
+    translation unit, e.g. in the case of a "unity" build."""
 
     # The try-catch here is to avoid a synchronisation primitive. This method
     # may be called from multiple threads, and python gives us
     # 1-python-statement synchronisation for "free" (via the GIL)
     try:
-      return self.flags_for_file[ filename ]
+      return self.flags_for_file[ filename, client_data ]
     except KeyError:
       pass
 
-    module = extra_conf_store.ModuleForSourceFile( filename )
-    try:
-      results = self._GetFlagsFromExtraConfOrDatabase( module,
-                                                       filename,
-                                                       client_data )
-    except NoCompilationDatabase:
-      if not self.no_extra_conf_file_warning_posted:
-        self.no_extra_conf_file_warning_posted = True
-        raise NoExtraConfDetected
-      return []
+    results = self._GetFlagsFromExtraConfOrDatabase( filename, client_data )
+    if not results.get( 'flags_ready', True ):
+      return [], filename
 
-    if not results or not results.get( 'flags_ready', True ):
-      return []
+    return self._ParseFlagsFromExtraConfOrDatabase( filename,
+                                                    results,
+                                                    add_extra_clang_flags,
+                                                    client_data )
+
+
+  def _ParseFlagsFromExtraConfOrDatabase( self,
+                                          filename,
+                                          results,
+                                          add_extra_clang_flags,
+                                          client_data ):
+    if 'override_filename' in results:
+      filename = results[ 'override_filename' ] or filename
 
     flags = _ExtractFlagsList( results )
     if not flags:
-      return []
+      return [], filename
 
     if add_extra_clang_flags:
       flags += self.extra_clang_flags
@@ -145,18 +162,37 @@ class Flags( object ):
 
     sanitized_flags = PrepareFlagsForClang( flags,
                                             filename,
-                                            add_extra_clang_flags )
+                                            add_extra_clang_flags,
+                                            _ShouldAllowWinStyleFlags( flags ) )
 
     if results.get( 'do_cache', True ):
-      self.flags_for_file[ filename ] = sanitized_flags
-    return sanitized_flags
+      self.flags_for_file[ filename, client_data ] = sanitized_flags, filename
+
+    return sanitized_flags, filename
 
 
-  def _GetFlagsFromExtraConfOrDatabase( self, module, filename, client_data ):
-    if not module:
-      return self._GetFlagsFromCompilationDatabase( filename )
+  def _GetFlagsFromExtraConfOrDatabase( self, filename, client_data ):
+    # Load the flags from the extra conf file if one is found and is not global.
+    module = extra_conf_store.ModuleForSourceFile( filename )
+    if module and not module.is_global_ycm_extra_conf:
+      return _CallExtraConfFlagsForFile( module, filename, client_data )
 
-    return _CallExtraConfFlagsForFile( module, filename, client_data )
+    # Load the flags from the compilation database if any.
+    database = self.FindCompilationDatabase( filename )
+    if database:
+      return self._GetFlagsFromCompilationDatabase( database, filename )
+
+    # Load the flags from the global extra conf if set.
+    if module:
+      return _CallExtraConfFlagsForFile( module, filename, client_data )
+
+    # No compilation database and no extra conf found. Warn the user if not
+    # already warned.
+    if not self.no_extra_conf_file_warning_posted:
+      self.no_extra_conf_file_warning_posted = True
+      raise NoExtraConfDetected
+
+    return EMPTY_FLAGS
 
 
   def Clear( self ):
@@ -165,11 +201,10 @@ class Flags( object ):
     self.file_directory_heuristic_map.clear()
 
 
-  def _GetFlagsFromCompilationDatabase( self, file_name ):
+  def _GetFlagsFromCompilationDatabase( self, database, file_name ):
     file_dir = os.path.dirname( file_name )
-    file_root, file_extension = os.path.splitext( file_name )
+    _, file_extension = os.path.splitext( file_name )
 
-    database = self.FindCompilationDatabase( file_dir )
     compilation_info = _GetCompilationInfoForFile( database,
                                                    file_name,
                                                    file_extension )
@@ -202,8 +237,8 @@ class Flags( object ):
     }
 
 
-  # Return a compilation database object for the supplied path. Raises
-  # NoCompilationDatabase if no compilation database can be found.
+  # Return a compilation database object for the supplied path or None if no
+  # compilation database is found.
   def FindCompilationDatabase( self, file_dir ):
     # We search up the directory hierarchy, to first see if we have a
     # compilation database already for that path, or if a compile_commands.json
@@ -211,11 +246,7 @@ class Flags( object ):
     for folder in PathsToAllParentFolders( file_dir ):
       # Try/catch to syncronise access to cache
       try:
-        database = self.compilation_database_dir_map[ folder ]
-        if database:
-          return database
-
-        raise NoCompilationDatabase
+        return self.compilation_database_dir_map[ folder ]
       except KeyError:
         pass
 
@@ -231,11 +262,25 @@ class Flags( object ):
     # Note: we cache the fact that none was found for this folder to speed up
     # subsequent searches.
     self.compilation_database_dir_map[ file_dir ] = None
-    raise NoCompilationDatabase
+    return None
 
 
 def _ExtractFlagsList( flags_for_file_output ):
   return [ ToUnicode( x ) for x in flags_for_file_output[ 'flags' ] ]
+
+
+def _ShouldAllowWinStyleFlags( flags ):
+  if OnWindows():
+    # Iterate in reverse because we only care
+    # about the last occurrence of --driver-mode flag.
+    for flag in reversed( flags ):
+      if flag.startswith( '--driver-mode' ):
+        return flag == '--driver-mode=cl'
+    # If there was no --driver-mode flag,
+    # check if we are using a compiler like clang-cl.
+    return bool( CL_COMPILER_REGEX.search( flags[ 0 ] ) )
+
+  return False
 
 
 def _CallExtraConfFlagsForFile( module, filename, client_data ):
@@ -251,12 +296,19 @@ def _CallExtraConfFlagsForFile( module, filename, client_data ):
   else:
     filename = native( ToUnicode( filename ) )
 
+  if hasattr( module, 'Settings' ):
+    results = module.Settings( language = 'cfamily',
+                               filename = filename,
+                               client_data = client_data )
   # For the sake of backwards compatibility, we need to first check whether the
   # FlagsForFile function in the extra conf module even allows keyword args.
-  if inspect.getargspec( module.FlagsForFile ).keywords:
+  elif inspect.getargspec( module.FlagsForFile ).keywords:
     results = module.FlagsForFile( filename, client_data = client_data )
   else:
     results = module.FlagsForFile( filename )
+
+  if not isinstance( results, dict ) or 'flags' not in results:
+    return EMPTY_FLAGS
 
   results[ 'flags' ] = _MakeRelativePathsInFlagsAbsolute(
       results[ 'flags' ],
@@ -273,10 +325,13 @@ def _SysRootSpecifedIn( flags ):
   return False
 
 
-def PrepareFlagsForClang( flags, filename, add_extra_clang_flags = True ):
-  flags = _AddLanguageFlagWhenAppropriate( flags )
+def PrepareFlagsForClang( flags,
+                          filename,
+                          add_extra_clang_flags = True,
+                          enable_windows_style_flags = False ):
+  flags = _AddLanguageFlagWhenAppropriate( flags, enable_windows_style_flags )
   flags = _RemoveXclangFlags( flags )
-  flags = _RemoveUnusedFlags( flags, filename )
+  flags = _RemoveUnusedFlags( flags, filename, enable_windows_style_flags )
   if add_extra_clang_flags:
     flags = _EnableTypoCorrection( flags )
 
@@ -293,7 +348,7 @@ def _RemoveXclangFlags( flags ):
 
   sanitized_flags = []
   saw_xclang = False
-  for i, flag in enumerate( flags ):
+  for flag in flags:
     if flag == '-Xclang':
       saw_xclang = True
       continue
@@ -306,38 +361,68 @@ def _RemoveXclangFlags( flags ):
   return sanitized_flags
 
 
-def _RemoveFlagsPrecedingCompiler( flags ):
-  """Assuming that the flag just before the first flag (which starts with a
-  dash) is the compiler path, removes all flags preceding it."""
+def _RemoveFlagsPrecedingCompiler( flags, enable_windows_style_flags ):
+  """Assuming that the flag just before the first flag (looks like a flag,
+  not like a file path) is the compiler path, removes all flags preceding it."""
 
   for index, flag in enumerate( flags ):
-    if flag.startswith( '-' ):
+    if ( flag.startswith( '-' ) or
+         ( enable_windows_style_flags and
+           flag.startswith( '/' ) and
+           not os.path.exists( flag ) ) ):
       return ( flags[ index - 1: ] if index > 1 else
                flags )
   return flags[ :-1 ]
 
 
-def _AddLanguageFlagWhenAppropriate( flags ):
+def _AddLanguageFlagWhenAppropriate( flags, enable_windows_style_flags ):
   """When flags come from the compile_commands.json file, the flag preceding the
   first flag starting with a dash is usually the path to the compiler that
   should be invoked. Since LibClang does not deduce the language from the
   compiler name, we explicitely set the language to C++ if the compiler is a C++
-  one (g++, clang++, etc.). Otherwise, we let LibClang guess the language from
-  the file extension. This handles the case where the .h extension is used for
-  C++ headers."""
+  one (g++, clang++, etc.). We also set the language to CUDA if any of the
+  source files has a .cu or .cuh extension. Otherwise, we let LibClang guess the
+  language from the file extension. This handles the case where the .h extension
+  is used for C++ headers."""
 
-  flags = _RemoveFlagsPrecedingCompiler( flags )
+  flags = _RemoveFlagsPrecedingCompiler( flags, enable_windows_style_flags )
 
-  # First flag is now the compiler path or a flag starting with a dash.
+  # First flag is now the compiler path, a flag starting with a dash or
+  # a flag starting with a forward slash if enable_windows_style_flags is True.
   first_flag = flags[ 0 ]
 
-  if ( not first_flag.startswith( '-' ) and
-       CPP_COMPILER_REGEX.search( first_flag ) ):
+  # Because of _RemoveFlagsPrecedingCompiler called above, irrelevant of
+  # enable_windows_style_flags. the first flag is either the compiler
+  # (path or executable), a Windows style flag or starts with a dash.
+  if first_flag.startswith( '-' ):
+    return flags
+
+  # Explicitly set the language to CUDA to avoid setting it to C++ when
+  # compiling CUDA source files with a C++ compiler
+  if any( fl.endswith( '.cu' ) or fl.endswith( '.cuh' )
+          for fl in reversed( flags ) ):
+    return [ first_flag, '-x', 'cuda' ] + flags[ 1: ]
+
+  # NOTE: This is intentionally NOT checking for enable_windows_style_flags.
+  #
+  # The first flag is now either an absolute path, a Windows style flag or a
+  # C++ compiler executable from $PATH.
+  #   If it starts with a forward slash the flag can either be an absolute
+  #   flag or a Windows style flag.
+  #     If it matches the regex, it is safe to assume the flag is a compiler
+  #     path.
+  #     If it does not match the regex, it could still be a Windows style
+  #     path or an absolute path. - This is determined in _RemoveUnusedFlags()
+  #     and cleaned properly.
+  #   If the flag starts with anything else (i.e. not a '-' or a '/'), the flag
+  #   is a stray file path and shall be gotten rid of in _RemoveUnusedFlags().
+  if CPP_COMPILER_REGEX.search( first_flag ):
     return [ first_flag, '-x', 'c++' ] + flags[ 1: ]
+
   return flags
 
 
-def _RemoveUnusedFlags( flags, filename ):
+def _RemoveUnusedFlags( flags, filename, enable_windows_style_flags ):
   """Given an iterable object that produces strings (flags for Clang), removes
   the '-c' and '-o' options that Clang does not like to see when it's producing
   completions for a file. Same for '-MD' etc.
@@ -355,26 +440,27 @@ def _RemoveUnusedFlags( flags, filename ):
     flags = flags[ 1: ]
 
   skip_next = False
-  previous_flag_is_include = False
-  previous_flag_starts_with_dash = False
-  current_flag_starts_with_dash = False
+  current_flag = flags[ 0 ]
 
+  filename = os.path.realpath( filename )
   for flag in flags:
-    previous_flag_starts_with_dash = current_flag_starts_with_dash
-    current_flag_starts_with_dash = flag.startswith( '-' )
+    previous_flag = current_flag
+    current_flag = flag
 
     if skip_next:
       skip_next = False
       continue
 
-    if flag in STATE_FLAGS_TO_SKIP:
+    if ( flag in STATE_FLAGS_TO_SKIP or
+         ( enable_windows_style_flags and
+           flag in STATE_FLAGS_TO_SKIP_WIN_STYLE ) ):
       continue
 
     if flag in FILE_FLAGS_TO_SKIP:
       skip_next = True
       continue
 
-    if flag == filename or os.path.realpath( flag ) == filename:
+    if os.path.realpath( flag ) == filename:
       continue
 
     # We want to make sure that we don't have any stray filenames in our flags;
@@ -383,14 +469,40 @@ def _RemoveUnusedFlags( flags, filename ):
     # "foo.cpp" when we are compiling "foo.h" because the comp db doesn't have
     # flags for headers. The returned flags include "foo.cpp" and we need to
     # remove that.
-    if ( not current_flag_starts_with_dash and
-          ( not previous_flag_starts_with_dash or
-            ( not previous_flag_is_include and '/' in flag ) ) ):
+    if _SkipStrayFilenameFlag( current_flag,
+                               previous_flag,
+                               enable_windows_style_flags ):
       continue
 
     new_flags.append( flag )
-    previous_flag_is_include = flag in INCLUDE_FLAGS
+
   return new_flags
+
+
+def _SkipStrayFilenameFlag( current_flag,
+                            previous_flag,
+                            enable_windows_style_flags ):
+  current_flag_starts_with_slash = current_flag.startswith( '/' )
+  previous_flag_starts_with_slash = previous_flag.startswith( '/' )
+
+  current_flag_starts_with_dash = current_flag.startswith( '-' )
+  previous_flag_starts_with_dash = previous_flag.startswith( '-' )
+
+  previous_flag_is_include = ( previous_flag in INCLUDE_FLAGS or
+                               ( enable_windows_style_flags and
+                                 previous_flag in INCLUDE_FLAGS_WIN_STYLE ) )
+
+  current_flag_may_be_path = ( '/' in current_flag or
+                               ( enable_windows_style_flags and
+                                 '\\' in current_flag ) )
+
+  return ( not ( current_flag_starts_with_dash or
+                 ( enable_windows_style_flags and
+                   current_flag_starts_with_slash ) ) and
+           ( not ( previous_flag_starts_with_dash or
+                   ( enable_windows_style_flags and
+                     previous_flag_starts_with_slash ) ) or
+             ( not previous_flag_is_include and current_flag_may_be_path ) ) )
 
 
 # Return the path to the macOS toolchain root directory to use for system
@@ -409,44 +521,30 @@ def _SelectMacToolchain():
   ]
 
   for toolchain in MAC_CLANG_TOOLCHAIN_DIRS:
-    if _MacClangIncludeDirExists( toolchain ):
+    if os.path.exists( toolchain ):
       return toolchain
 
   return None
 
 
-# Ultimately, this method exists only for testability
-def _GetMacClangVersionList( candidates_dir ):
-  try:
-    return os.listdir( candidates_dir )
-  except OSError:
-    # Path might not exist, so just ignore
-    return []
-
-
-# Ultimately, this method exists only for testability
-def _MacClangIncludeDirExists( candidate_include ):
-  return os.path.exists( candidate_include )
-
-
-# Add in any clang headers found in the supplied toolchain. These are
-# required for the same reasons as described below, but unfortuantely, these
-# are in versioned directories and there is no easy way to find the "correct"
-# version. We simply pick the highest version in the first toolchain that we
-# find, as this is the most likely to be correct.
+# Return the list of flags including any Clang headers found in the supplied
+# toolchain. These are required for the same reasons as described below, but
+# unfortunately, these are in versioned directories and there is no easy way to
+# find the "correct" version. We simply pick the highest version in the first
+# toolchain that we find, as this is the most likely to be correct.
 def _LatestMacClangIncludes( toolchain ):
-  # we use the first toolchain which actually contains any versions, rather
-  # than trying all of the toolchains and picking the highest. We
-  # favour Xcode over CommandLineTools as using Xcode is more common.
-  # It might be possible to extrace this information from xcode-select, though
-  # xcode-select -p does not point at the toolchain directly
+  # We use the first toolchain which actually contains any versions, rather than
+  # trying all of the toolchains and picking the highest. We favour Xcode over
+  # CommandLineTools as using Xcode is more common. It might be possible to
+  # extract this information from xcode-select, though xcode-select -p does not
+  # point at the toolchain directly.
   candidates_dir = os.path.join( toolchain, 'usr', 'lib', 'clang' )
-  versions = _GetMacClangVersionList( candidates_dir )
+  versions = ListDirectory( candidates_dir )
 
   for version in reversed( sorted( versions ) ):
     candidate_include = os.path.join( candidates_dir, version, 'include' )
-    if _MacClangIncludeDirExists( candidate_include ):
-      return [ candidate_include ]
+    if os.path.exists( candidate_include ):
+      return [ '-isystem', candidate_include ]
 
   return []
 
@@ -465,25 +563,24 @@ if OnMac():
   toolchain = _SelectMacToolchain()
   if toolchain:
     MAC_INCLUDE_PATHS = (
-      [ os.path.join( toolchain, 'usr/include/c++/v1' ),
-        '/usr/local/include',
-        os.path.join( toolchain, 'usr/include' ),
-        '/usr/include',
-        '/System/Library/Frameworks',
-        '/Library/Frameworks' ] +
+      [ '-isystem', os.path.join( toolchain, 'usr/include/c++/v1' ),
+        '-isystem', '/usr/local/include' ] +
       _LatestMacClangIncludes( toolchain ) +
-      # We include the MacOS platform SDK because some meaningful parts of the
-      # standard library are located there. If users are compiling for (say)
-      # iPhone.platform, etc. they should appear earlier in the include path.
-      [ '/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/'
-        'Developer/SDKs/MacOSX.sdk/usr/include' ]
+      [ '-isystem', os.path.join( toolchain, 'usr/include' ),
+        '-isystem', '/usr/include',
+        '-iframework', '/System/Library/Frameworks',
+        '-iframework', '/Library/Frameworks',
+        # We include the MacOS platform SDK because some meaningful parts of the
+        # standard library are located there. If users are compiling for (say)
+        # iPhone.platform, etc. they should appear earlier in the include path.
+        '-isystem', '/Applications/Xcode.app/Contents/Developer/Platforms'
+                    '/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include' ]
     )
 
 
 def _AddMacIncludePaths( flags ):
   if OnMac() and not _SysRootSpecifedIn( flags ):
-    for path in MAC_INCLUDE_PATHS:
-      flags.extend( [ '-isystem', path ] )
+    flags.extend( MAC_INCLUDE_PATHS )
   return flags
 
 
@@ -532,6 +629,9 @@ def _MakeRelativePathsInFlagsAbsolute( flags, working_directory ):
     return list( flags )
   new_flags = []
   make_next_absolute = False
+  path_flags = ( PATH_FLAGS + INCLUDE_FLAGS_WIN_STYLE
+                 if _ShouldAllowWinStyleFlags( flags )
+                 else PATH_FLAGS )
   for flag in flags:
     new_flag = flag
 
@@ -541,7 +641,7 @@ def _MakeRelativePathsInFlagsAbsolute( flags, working_directory ):
         new_flag = os.path.join( working_directory, flag )
       new_flag = os.path.normpath( new_flag )
     else:
-      for path_flag in PATH_FLAGS:
+      for path_flag in path_flags:
         # Single dash argument alone, e.g. -isysroot <path>
         if flag == path_flag:
           make_next_absolute = True
@@ -589,36 +689,42 @@ def _GetCompilationInfoForFile( database, file_name, file_extension ):
   return None
 
 
-def UserIncludePaths( flags, filename ):
-  quoted_include_paths = [ os.path.dirname( filename ) ]
-  include_paths = []
+def UserIncludePaths( user_flags, filename ):
+  """
+  Returns a tuple ( quoted_include_paths, include_paths )
 
-  if flags:
-    quote_flag = '-iquote'
-    path_flags = [ '-isystem', '-I' ]
+  quoted_include_paths is a list of include paths that are only suitable for
+  quoted include statement.
+  include_paths is a list of include paths that can be used for angle bracketed
+  and quoted include statement.
+  """
+  quoted_include_paths = [ ToUnicode( os.path.dirname( filename ) ) ]
+  include_paths = []
+  framework_paths = []
+
+  if user_flags:
+    include_flags = { '-iquote':     quoted_include_paths,
+                      '-I':          include_paths,
+                      '-isystem':    include_paths,
+                      '-F':          framework_paths,
+                      '-iframework': framework_paths }
+    if _ShouldAllowWinStyleFlags( user_flags ):
+      include_flags[ '/I' ] = include_paths
 
     try:
-      it = iter( flags )
-      for flag in it:
-        flag_len = len( flag )
-        if flag.startswith( quote_flag ):
-          quote_flag_len = len( quote_flag )
-          # Add next flag to the include paths if current flag equals to
-          # '-iquote', or add remaining string otherwise.
-          quoted_include_path = ( next( it ) if flag_len == quote_flag_len else
-                                  flag[ quote_flag_len: ] )
-          if quoted_include_path:
-            quoted_include_paths.append( ToUnicode( quoted_include_path ) )
-        else:
-          for path_flag in path_flags:
-            if flag.startswith( path_flag ):
-              path_flag_len = len( path_flag )
-              include_path = ( next( it ) if flag_len == path_flag_len else
-                               flag[ path_flag_len: ] )
-              if include_path:
-                include_paths.append( ToUnicode( include_path ) )
-              break
+      it = iter( user_flags )
+      for user_flag in it:
+        user_flag_len = len( user_flag )
+        for flag in include_flags:
+          if user_flag.startswith( flag ):
+            flag_len = len( flag )
+            include_path = ( next( it ) if user_flag_len == flag_len else
+                             user_flag[ flag_len: ] )
+            if include_path:
+              container = include_flags[ flag ]
+              container.append( ToUnicode( include_path ) )
+            break
     except StopIteration:
       pass
 
-  return quoted_include_paths, include_paths
+  return quoted_include_paths, include_paths, framework_paths

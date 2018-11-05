@@ -21,9 +21,9 @@
 #include <cstring> // for strerror/strerror_r
 
 # if defined( BOOST_WINDOWS_API )
-#   include <boost/detail/winapi/error_codes.hpp>
-#   include <boost/detail/winapi/error_handling.hpp>
-#   include <boost/detail/winapi/character_code_conversion.hpp>
+#   include <boost/winapi/error_codes.hpp>
+#   include <boost/winapi/error_handling.hpp>
+#   include <boost/winapi/character_code_conversion.hpp>
 #   if !BOOST_PLAT_WINDOWS_RUNTIME
 #     include <boost/system/detail/local_free_on_destruction.hpp>
 #   endif
@@ -35,39 +35,22 @@
 //--------------------------------------------------------------------------------------//
 namespace boost
 {
-    namespace system
-    {
 
-namespace
+namespace system
 {
 
-  //  standard error categories  -------------------------------------------------------//
+namespace detail
+{
 
-  class generic_error_category : public error_category
-  {
-  public:
-    generic_error_category(){}
-    const char *   name() const BOOST_SYSTEM_NOEXCEPT;
-    std::string    message( int ev ) const;
-  };
-
-  class system_error_category : public error_category
-  {
-  public:
-    system_error_category(){}
-    const char *        name() const BOOST_SYSTEM_NOEXCEPT;
-    std::string         message( int ev ) const;
-    error_condition     default_error_condition( int ev ) const BOOST_SYSTEM_NOEXCEPT;
-  };
+#ifdef BOOST_ERROR_CODE_HEADER_ONLY
+# define BOOST_SYSTEM_DECL_ inline
+#else
+# define BOOST_SYSTEM_DECL_ BOOST_SYSTEM_DECL
+#endif
 
   //  generic_error_category implementation  ---------------------------------//
 
-  const char * generic_error_category::name() const BOOST_SYSTEM_NOEXCEPT
-  {
-    return "generic";
-  }
-
-  std::string generic_error_category::message( int ev ) const
+  BOOST_SYSTEM_DECL_ std::string generic_error_category::message( int ev ) const
   {
     using namespace boost::system::errc;
 #if defined(__PGI)
@@ -154,19 +137,13 @@ namespace
 #   endif
 
       if ( sz > sizeof(buf) ) std::free( bp );
-      sz = 0;
       return msg;
   #  endif   // else POSIX version of strerror_r
   # endif  // else use strerror_r
   }
   //  system_error_category implementation  --------------------------------------------//
 
-  const char * system_error_category::name() const BOOST_SYSTEM_NOEXCEPT
-  {
-    return "system";
-  }
-
-  error_condition system_error_category::default_error_condition( int ev ) const
+  BOOST_SYSTEM_DECL_ error_condition system_error_category::default_error_condition( int ev ) const
     BOOST_SYSTEM_NOEXCEPT
   {
     using namespace boost::system::errc;
@@ -187,7 +164,7 @@ namespace
 
 # if defined(BOOST_WINDOWS_API)
 
-    using namespace boost::detail::winapi; // for error codes
+    using namespace boost::winapi; // for error codes
 
 # endif
 
@@ -371,27 +348,27 @@ namespace
 
 # if !defined( BOOST_WINDOWS_API )
 
-  std::string system_error_category::message( int ev ) const
+  BOOST_SYSTEM_DECL_ std::string system_error_category::message( int ev ) const
   {
     return generic_category().message( ev );
   }
 # else
 
-  std::string system_error_category::message( int ev ) const
+  BOOST_SYSTEM_DECL_ std::string system_error_category::message( int ev ) const
   {
 #if defined(UNDER_CE) || BOOST_PLAT_WINDOWS_RUNTIME || defined(BOOST_NO_ANSI_APIS)
     std::wstring buf(128, wchar_t());
     for (;;)
     {
-        boost::detail::winapi::DWORD_ retval = boost::detail::winapi::FormatMessageW(
-            boost::detail::winapi::FORMAT_MESSAGE_FROM_SYSTEM_ |
-            boost::detail::winapi::FORMAT_MESSAGE_IGNORE_INSERTS_,
+        boost::winapi::DWORD_ retval = boost::winapi::FormatMessageW(
+            boost::winapi::FORMAT_MESSAGE_FROM_SYSTEM_ |
+            boost::winapi::FORMAT_MESSAGE_IGNORE_INSERTS_,
             NULL,
             ev,
-            boost::detail::winapi::MAKELANGID_(boost::detail::winapi::LANG_NEUTRAL_,
-            boost::detail::winapi::SUBLANG_DEFAULT_), // Default language
+            boost::winapi::MAKELANGID_(boost::winapi::LANG_NEUTRAL_,
+            boost::winapi::SUBLANG_DEFAULT_), // Default language
             &buf[0],
-            buf.size(),
+            static_cast<boost::winapi::DWORD_>(buf.size()),
             NULL
         );
         
@@ -400,8 +377,8 @@ namespace
             buf.resize(retval);
             break;
         }
-        else if (boost::detail::winapi::GetLastError() !=
-          boost::detail::winapi::ERROR_INSUFFICIENT_BUFFER_)
+        else if (boost::winapi::GetLastError() !=
+          boost::winapi::ERROR_INSUFFICIENT_BUFFER_)
         {
             return std::string("Unknown error");
         }
@@ -411,10 +388,16 @@ namespace
         }
     }
     
-    int num_chars = (buf.size() + 1) * 2;
-    boost::detail::winapi::LPSTR_ narrow_buffer =
-      (boost::detail::winapi::LPSTR_)_alloca(num_chars);
-    if (boost::detail::winapi::WideCharToMultiByte(boost::detail::winapi::CP_ACP_, 0,
+    int num_chars = static_cast<int>(buf.size() + 1) * 2;
+
+    boost::winapi::LPSTR_ narrow_buffer =
+#if defined(__GNUC__)
+      (boost::winapi::LPSTR_)__builtin_alloca(num_chars);
+#else
+      (boost::winapi::LPSTR_)_alloca(num_chars);
+#endif
+
+    if (boost::winapi::WideCharToMultiByte(boost::winapi::CP_ACP_, 0,
       buf.c_str(), -1, narrow_buffer, num_chars, NULL, NULL) == 0)
     {
         return std::string("Unknown error");
@@ -422,16 +405,16 @@ namespace
 
     std::string str( narrow_buffer );
 #else
-    boost::detail::winapi::LPVOID_ lpMsgBuf = 0;
-    boost::detail::winapi::DWORD_ retval = boost::detail::winapi::FormatMessageA(
-        boost::detail::winapi::FORMAT_MESSAGE_ALLOCATE_BUFFER_ |
-        boost::detail::winapi::FORMAT_MESSAGE_FROM_SYSTEM_ |
-        boost::detail::winapi::FORMAT_MESSAGE_IGNORE_INSERTS_,
+    boost::winapi::LPVOID_ lpMsgBuf = 0;
+    boost::winapi::DWORD_ retval = boost::winapi::FormatMessageA(
+        boost::winapi::FORMAT_MESSAGE_ALLOCATE_BUFFER_ |
+        boost::winapi::FORMAT_MESSAGE_FROM_SYSTEM_ |
+        boost::winapi::FORMAT_MESSAGE_IGNORE_INSERTS_,
         NULL,
         ev,
-        boost::detail::winapi::MAKELANGID_(boost::detail::winapi::LANG_NEUTRAL_,
-        boost::detail::winapi::SUBLANG_DEFAULT_), // Default language
-        (boost::detail::winapi::LPSTR_) &lpMsgBuf,
+        boost::winapi::MAKELANGID_(boost::winapi::LANG_NEUTRAL_,
+        boost::winapi::SUBLANG_DEFAULT_), // Default language
+        (boost::winapi::LPSTR_) &lpMsgBuf,
         0,
         NULL
     );
@@ -439,7 +422,7 @@ namespace
     if (retval == 0)
         return std::string("Unknown error");
 
-    std::string str(static_cast<boost::detail::winapi::LPCSTR_>(lpMsgBuf));
+    std::string str(static_cast<boost::winapi::LPCSTR_>(lpMsgBuf));
 # endif
     while ( str.size()
       && (str[str.size()-1] == '\n' || str[str.size()-1] == '\r') )
@@ -450,10 +433,12 @@ namespace
   }
 # endif
 
-} // unnamed namespace
+#undef BOOST_SYSTEM_DECL_
+
+} // namespace detail
 
 
-# ifndef BOOST_SYSTEM_NO_DEPRECATED
+# ifdef BOOST_SYSTEM_ENABLE_DEPRECATED
     BOOST_SYSTEM_DECL error_code throws; // "throw on error" special error_code;
                                          //  note that it doesn't matter if this
                                          //  isn't initialized before use since
@@ -461,23 +446,51 @@ namespace
                                          //  address for comparison purposes
 # endif
 
-# ifdef BOOST_ERROR_CODE_HEADER_ONLY
-#   define BOOST_SYSTEM_LINKAGE inline
-# else
-#   define BOOST_SYSTEM_LINKAGE BOOST_SYSTEM_DECL
-# endif
+#if defined(BOOST_ERROR_CODE_HEADER_ONLY)
 
-    BOOST_SYSTEM_LINKAGE const error_category & system_category() BOOST_SYSTEM_NOEXCEPT
-    {
-      static const system_error_category  system_category_const;
-      return system_category_const;
-    }
+// defined in error_code.hpp
 
-    BOOST_SYSTEM_LINKAGE const error_category & generic_category() BOOST_SYSTEM_NOEXCEPT
-    {
-      static const generic_error_category generic_category_const;
-      return generic_category_const;
-    }
+#elif defined(BOOST_SYSTEM_HAS_CONSTEXPR)
 
-  } // namespace system
+namespace detail
+{
+
+BOOST_SYSTEM_REQUIRE_CONST_INIT BOOST_SYSTEM_DECL system_error_category system_category_instance;
+BOOST_SYSTEM_REQUIRE_CONST_INIT BOOST_SYSTEM_DECL generic_error_category generic_category_instance;
+
+BOOST_SYSTEM_DECL const error_category & system_category_ncx() BOOST_SYSTEM_NOEXCEPT
+{
+    return system_category_instance;
+}
+
+BOOST_SYSTEM_DECL const error_category & generic_category_ncx() BOOST_SYSTEM_NOEXCEPT
+{
+    return generic_category_instance;
+}
+
+} // namespace detail
+
+#else
+
+namespace detail
+{
+
+BOOST_SYSTEM_DECL const error_category & system_category_ncx() BOOST_SYSTEM_NOEXCEPT
+{
+    static const detail::system_error_category system_category_instance;
+    return system_category_instance;
+}
+
+BOOST_SYSTEM_DECL const error_category & generic_category_ncx() BOOST_SYSTEM_NOEXCEPT
+{
+    static const detail::generic_error_category generic_category_instance;
+    return generic_category_instance;
+}
+
+} // namespace detail
+
+#endif
+
+} // namespace system
+
 } // namespace boost
